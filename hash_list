@@ -1,0 +1,809 @@
+#pragma once
+#ifndef DS_HASH_LIST
+#define DS_HASH_LIST
+
+#include "common"
+#include "traits/allocator"
+#include "traits/iterable"
+#include "unique"
+#include "fixed"
+#include "list"
+
+namespace ds {
+
+template <size_t table_size_, typename E> struct HashListNode;
+template <size_t table_size_, typename E, class A = DefaultAllocator> class HashListIterator;
+template <size_t table_size_, typename E, class A = DefaultAllocator> class ConstHashListIterator;
+template <size_t table_size_, typename E, class A = DefaultAllocator> class HashList;
+
+namespace traits {
+
+	template <size_t table_size_, typename E, class A>
+	struct iterable<HashList<table_size_,E,A>> : public iterable_traits<
+			  E
+			, size_t
+			, void
+			, void const
+			, HashListIterator<table_size_,E,A>
+			, ConstHashListIterator<table_size_,E,A>
+			, HashListIterator<table_size_,E,A>
+			, ConstHashListIterator<table_size_,E,A>
+		> 
+	{};
+
+	template <size_t table_size_, typename E, class A>
+	struct iterable<HashList<table_size_,E,A> const> : public iterable_traits<
+			  E
+			, size_t
+			, void
+			, void const
+			, void
+			, ConstHashListIterator<table_size_,E,A>
+			, void
+			, ConstHashListIterator<table_size_,E,A>
+		> 
+	{};
+
+	template <size_t table_size_, typename E, class A>
+	struct allocator<HashList<table_size_,E,A>> : public allocator_traits<A> {};
+
+	template <size_t table_size_, typename E, class A>
+	struct allocator<HashList<table_size_,E,A> const> : public allocator_traits<A> {};
+
+} // namespace trait
+
+
+template <size_t table_size_, typename E>
+struct HashListNode
+{
+	E              object  {};
+	HashListNode * prev = nullptr;
+	HashListNode * next = nullptr;
+
+	template <typename... Args>
+	HashListNode(Args &&... args)
+		: object (forward<Args>(args)...)
+	{}
+
+};
+
+template <size_t table_size_, typename E, class A>
+class HashListIterator
+{
+	friend class HashList<table_size_,E,A>;
+	friend class ConstHashListIterator<table_size_,E,A>;
+	using node_t           = HashListNode<table_size_,E>;
+	using list_t           = HashList<table_size_,E,A>;
+	using const_iterator_t = ConstHashListIterator<table_size_,E,A>;
+
+	list_t * m_list = nullptr;
+	node_t * m_node = nullptr;
+	int      m_end  = 0; // at end if > 0 and null node, else at reverse end if < 0 and null node  
+	
+	HashListIterator(list_t * list_, node_t * node_, int end_ = 0)
+		: m_list { list_ }
+		, m_node { node_ }
+		, m_end  { end_  }
+	{}
+
+ public:
+	struct null_iterator : public std::exception
+	{
+		char const * what() const noexcept override { return "null iterator"; }
+	};
+
+	HashListIterator() = default;
+	HashListIterator(HashListIterator const &) = default;
+	HashListIterator(HashListIterator &&) = default;
+	HashListIterator & operator=(HashListIterator const &) = default;
+	HashListIterator & operator=(HashListIterator &&) = default;
+
+	inline E       & operator*()        noexcept { return m_node->object ; }
+	inline E const & operator*()  const noexcept { return m_node->object ; }
+
+	inline E       * operator->()       noexcept { return &m_node->object ; }
+	inline E const * operator->() const noexcept { return &m_node->object ; }
+
+	inline bool operator!() const noexcept { return m_node == nullptr; }
+
+	explicit inline operator bool()          noexcept { return m_node != nullptr; }
+	explicit inline operator bool()    const noexcept { return m_node != nullptr; }
+
+	inline bool 
+	operator==(HashListIterator const & rhs) const noexcept
+	{
+		return m_node == rhs.m_node && (m_end * rhs.m_end >= 0);
+	}
+
+	inline bool 
+	operator!=(HashListIterator const & rhs) const noexcept
+	{
+		return m_node != rhs.m_node || (m_end * rhs.m_end < 0);
+	}
+	
+	inline bool 
+	operator==(const_iterator_t const & rhs) const noexcept
+	{
+		return m_node == rhs.m_node && (m_end * rhs.m_end >= 0);
+	}
+
+	inline bool 
+	operator!=(const_iterator_t const & rhs) const noexcept
+	{
+		return m_node != rhs.m_node || (m_end * rhs.m_end < 0);
+	}
+
+	HashListIterator &
+	operator++() noexcept
+	{
+		if(m_node)
+		{
+			m_node = m_node->next;
+			if(!m_node)
+				m_end = 1; // at the end
+		}
+		else if(m_list != nullptr && m_end < 0)
+		{
+			m_node = m_list->m_first;
+			m_end  = 0;
+		}
+		return *this;
+	}
+	
+	HashListIterator
+	operator++(int) noexcept
+	{
+		auto it_ = *this;
+		this->operator++();
+		return move(it_);
+	}
+	
+	HashListIterator &
+	operator--() noexcept
+	{
+		if(m_node)
+		{
+			m_node = m_node->prev;
+			if(!m_node)
+				m_end = -1; // at the reverse-end
+		}
+		else if(m_list != nullptr && m_end > 0)
+		{
+			m_node = m_list->m_last;
+			m_end  = 0;
+		}
+		return *this;
+	}
+
+	HashListIterator
+	operator--(int) noexcept
+	{
+		auto it_ = *this;
+		this->operator--();
+		return move(it_);
+	}
+	
+	inline E       * ptr()       noexcept { return m_node == nullptr ? nullptr : &m_node->object ; }
+	inline E const * ptr() const noexcept { return m_node == nullptr ? nullptr : &m_node->object ; }
+
+	inline E & 
+	ref() noexcept(false) 
+	{ 
+		ds_throw_if(!m_node, null_iterator());
+		return m_node->object ; 
+	}
+
+	inline E const & 
+	ref() const noexcept(false) 
+	{ 
+		ds_throw_if(!m_node, null_iterator());
+		return m_node->object ; 
+	}
+
+	inline void
+	swap(HashListIterator & rhs) noexcept
+	{
+		ds::swap(m_list, rhs.m_list);
+		ds::swap(m_node, rhs.m_node);
+		ds::swap(m_end,  rhs.m_end);
+	}
+
+};
+
+
+template <size_t table_size_, typename E, class A>
+class ConstHashListIterator
+{
+	friend class HashList<table_size_,E,A>;
+	friend class HashListIterator<table_size_,E,A>;
+	using node_t     = HashListNode<table_size_,E>;
+	using list_t     = HashList<table_size_,E,A>;
+	using iterator_t = HashListIterator<table_size_,E,A>;
+
+	list_t const * m_list = nullptr;
+	node_t       * m_node = nullptr;
+	int            m_end  = 0; // at end if > 0 and null node, else at reverse end if < 0 and null node  
+	
+	ConstHashListIterator(list_t const * list_, node_t * node_, int end_ = 0)
+		: m_list { list_ }
+		, m_node { node_ }
+		, m_end  { end_  }
+	{}
+
+ public:
+	struct null_iterator : public std::exception
+	{
+		char const * what() const noexcept override { return "null iterator"; }
+	};
+
+	ConstHashListIterator() = default;
+	ConstHashListIterator(ConstHashListIterator const &) = default;
+	ConstHashListIterator(ConstHashListIterator &&) = default;
+	ConstHashListIterator & operator=(ConstHashListIterator const &) = default;
+	ConstHashListIterator & operator=(ConstHashListIterator &&) = default;
+
+	inline E const & operator*()  const noexcept { return m_node->object ; }
+
+	inline E const * operator->() const noexcept { return &m_node->object ; }
+
+	inline bool operator!() const noexcept { return m_node == nullptr; }
+
+	explicit inline operator bool()          noexcept { return m_node != nullptr; }
+	explicit inline operator bool()    const noexcept { return m_node != nullptr; }
+
+	inline bool 
+	operator==(ConstHashListIterator const & rhs) const noexcept
+	{
+		return m_node == rhs.m_node && (m_end * rhs.m_end >= 0);
+	}
+
+	inline bool 
+	operator!=(ConstHashListIterator const & rhs) const noexcept
+	{
+		return m_node != rhs.m_node || (m_end * rhs.m_end < 0);
+	}
+	
+	inline bool 
+	operator==(iterator_t const & rhs) const noexcept
+	{
+		return m_node == rhs.m_node && (m_end * rhs.m_end >= 0);
+	}
+
+	inline bool 
+	operator!=(iterator_t const & rhs) const noexcept
+	{
+		return m_node != rhs.m_node || (m_end * rhs.m_end < 0);
+	}
+
+	ConstHashListIterator &
+	operator++() noexcept
+	{
+		if(m_node)
+		{
+			m_node = m_node->next;
+			if(!m_node)
+				m_end = 1; // at the end
+		}
+		else if(m_list != nullptr && m_end < 0)
+		{
+			m_node = m_list->m_first;
+			m_end  = 0;
+		}
+		return *this;
+	}
+	
+	ConstHashListIterator
+	operator++(int) noexcept
+	{
+		auto it_ = *this;
+		this->operator++();
+		return move(it_);
+	}
+	
+	ConstHashListIterator &
+	operator--() noexcept
+	{
+		if(m_node)
+		{
+			m_node = m_node->prev;
+			if(!m_node)
+				m_end = -1; // at the reverse-end
+		}
+		else if(m_list != nullptr && m_end > 0)
+		{
+			m_node = m_list->m_last;
+			m_end  = 0;
+		}
+		return *this;
+	}
+
+	ConstHashListIterator
+	operator--(int) noexcept
+	{
+		auto it_ = *this;
+		this->operator--();
+		return move(it_);
+	}
+	
+	inline E const * ptr() const noexcept { return m_node == nullptr ? nullptr : &m_node->object ; }
+
+	inline E const & 
+	ref() const noexcept(false) 
+	{ 
+		ds_throw_if(!m_node, null_iterator());
+		return m_node->object ; 
+	}
+
+	inline void
+	swap(ConstHashListIterator & rhs) noexcept
+	{
+		ds::swap(m_list, rhs.m_list);
+		ds::swap(m_node, rhs.m_node);
+		ds::swap(m_end,  rhs.m_end);
+	}
+
+};
+
+
+template <size_t table_size_, typename E, class A> 
+class HashList
+{
+	friend class HashListIterator<table_size_,E,A>;
+	friend class ConstHashListIterator<table_size_,E,A>;
+
+ public:
+	using node_t           = HashListNode<table_size_,E>;
+	using table_t          = Unique<Fixed<table_size_,node_t *>,A>;
+	using iterator_t       = HashListIterator<table_size_,E,A>;
+	using const_iterator_t = ConstHashListIterator<table_size_,E,A>;
+
+ private:
+	table_t   m_table = {};
+	node_t  * m_first = nullptr;
+	node_t  * m_last  = nullptr;
+	size_t    m_size  = 0;
+
+	static inline void
+	_deallocate(void * block_) noexcept
+	{
+		return A::deallocate(block_);
+	}
+
+	DS_nodiscard static inline void *
+	_allocate(size_t size_, align_t align_)
+	{
+		return A::allocate(size_, align_);
+	}
+	
+	template <typename T = E, typename = decltype(decl<hash<E>>()(decl<T>()))>
+	inline size_t 
+	_hash_index(T && object) const noexcept
+	{
+		auto   hash_  = hash<E>()(object);
+		return hash_ % m_table->size();
+	}
+
+	template <typename T = E, typename = decltype(decl<hash<E>>()(decl<T>()))>
+	inline node_t * &
+	_hash_entry(T && object) noexcept
+	{
+		return (*m_table)[_hash_index(object)];
+	}
+
+	template <typename T = E, typename = decltype(decl<hash<E>>()(decl<T>()))>
+	inline node_t * &
+	_hash_entry_and_index(T && object, size_t & index) noexcept
+	{
+		index = _hash_index(object);
+		return (*m_table)[index];
+	}
+
+	// insert node at the end of the list
+	iterator_t
+	_insert_node_last(node_t * const node) noexcept
+	{
+		if(!m_first)
+			m_first = m_last = node;
+		else
+		{
+			node->prev   = m_last;
+			node->next   = nullptr;
+			m_last->next = node;
+			m_last       = node;
+		}
+		++m_size;
+		return { this, node };
+	}
+
+	// insert node at the begining of the list
+	iterator_t
+	_insert_node_first(node_t * const node) noexcept
+	{
+		if(!m_first)
+			m_first = m_last = node;
+		else
+		{
+			node->prev    = nullptr;
+			node->next    = m_first;
+			m_first->prev = node;
+			m_first       = node;
+		}
+		++m_size;
+		return { this, node };
+	}
+
+	iterator_t
+	_insert_node_before(node_t * const before_node, node_t * const node) noexcept
+	{
+		if(!m_first)
+			m_first = m_last = node;
+		else if(!before_node || before_node == m_first)
+		{
+			node->prev    = nullptr;
+			node->next    = m_first;
+			m_first->prev = node;
+			m_first       = node;
+		}
+		else
+		{
+			node->prev = before_node->prev;
+			node->next = before_node;
+			before_node->prev = node;
+			if(node->prev)
+				node->prev->next = node;
+		}
+		++m_size;
+		return { this, node };
+	}
+
+	iterator_t
+	_insert_node_after(node_t * const after_node, node_t * const node) noexcept
+	{
+		if(!m_first)
+			m_first = m_last = node;
+		else if(!after_node || after_node == m_last)
+		{
+			node->prev    = m_last;
+			node->next    = nullptr;
+			m_last->next  = node;
+			m_last        = node;
+		}
+		else
+		{
+			node->prev = after_node;
+			node->next = after_node->next;
+			after_node->next = node;
+			if(node->next)
+				node->next->prev = node;
+		}
+		++m_size;
+		return { this, node };
+	}
+
+	template <typename T = E>
+	iterator_t
+	_insert_object(T && object) noexcept
+	{
+		auto & entry = _hash_entry(object);
+		node_t * const node = construct_at_safe<node_t>(_allocate(sizeof(node_t), alignof(node_t)), forward<T>(object));
+		if(!node)
+			return {};
+		auto * inode  = entry;
+		entry = node;
+		if(inode != nullptr)
+			return _insert_node_after(inode, node);
+		return _insert_node_last(node);
+	}
+
+	template <typename T = E>
+	iterator_t
+	_insert_object_unique(T && object, bool replace) noexcept
+	{
+		size_t hash_index = 0;
+		auto & entry = _hash_entry_and_index(object, hash_index);
+		if(entry != nullptr)
+		{
+			auto * inode = entry;
+			auto * jnode = inode;
+			for(; jnode && _hash_index(jnode->object) == hash_index; jnode = jnode->prev)
+			{
+				if(jnode->object == object)
+				{
+					if(replace)
+					{
+						destruct(jnode->object);
+						construct_at<E>(&jnode->object, forward<T>(object));
+					}
+					return { this, jnode };
+				}
+			}
+			// no duplicates found
+			node_t * const node = construct_at_safe<node_t>(_allocate(sizeof(node_t), alignof(node_t)), forward<T>(object));
+			if(!node)
+				return {};
+			entry = node;
+			return _insert_node_after(inode, node);
+		}
+		else
+		{
+			node_t * const node = construct_at_safe<node_t>(_allocate(sizeof(node_t), alignof(node_t)), forward<T>(object));
+			if(!node)
+				return {};
+			entry = node;
+			return _insert_node_last(node);
+		}
+	}
+
+ public:
+	HashList() = default;
+
+	~HashList() noexcept
+	{
+		this->destroy();
+	}
+
+	HashList(noinit_t)
+		: m_table { noinit }
+	{}
+
+	HashList(HashList && rhs) noexcept
+		: m_table { move(rhs.m_table) }
+		, m_first { rhs.m_first }
+		, m_last  { rhs.m_last  }
+		, m_size  { rhs.m_size  }
+	{
+		rhs.m_first = nullptr;
+		rhs.m_last  = nullptr;
+		rhs.m_size  = 0;
+	}
+
+	HashList(HashList const & rhs)
+	{
+		if(m_table)
+			for(auto node = rhs.m_first; node != nullptr && this->insert(node->object); node = node->next);
+	}
+
+	template <typename T = E, size_t size_, enable_if_t<is_constructible<E,T &&>::value,int> = 0>
+	HashList(T (&& array_)[size_])
+	{
+		if(m_table)
+			for(size_t i = 0; i < size_ && this->insert(move(array_[i])); ++i);
+	}
+
+	HashList & 
+	operator=(HashList && rhs) noexcept
+	{
+		if(&rhs != this)
+		{
+			this->swap(rhs);
+			rhs.destroy();
+		}
+		return *this;
+	}
+
+	HashList & 
+	operator=(HashList const & rhs)
+	{
+		if(&rhs != this)
+		{
+			this->destroy();
+			m_table = {};
+			if(m_table)
+				for(auto node = rhs.m_first; node != nullptr && this->insert(node->object); node = node->next);
+		}
+		return *this;
+	}
+
+	inline bool operator!() const noexcept { return !m_table || m_first != nullptr; }
+
+	explicit inline operator bool()       noexcept { return bool(m_table) && m_first != nullptr; }
+	explicit inline operator bool() const noexcept { return bool(m_table) && m_first != nullptr; }
+
+	table_t const & table() const noexcept { return m_table; }
+
+	size_t size() const noexcept { return m_size; }
+
+	iterator_t       begin()        noexcept { return { this, m_first };  }
+	const_iterator_t begin()  const noexcept { return { this, m_first };  }
+	iterator_t       end()          noexcept { return { this, nullptr, 1 };    }
+	const_iterator_t end()    const noexcept { return { this, nullptr, 1 };    }
+
+	iterator_t       rbegin()       noexcept { return { this, m_last }; }
+	const_iterator_t rbegin() const noexcept { return { this, m_last }; }
+	iterator_t       rend()         noexcept { return { this, nullptr, -1 };   }
+	const_iterator_t rend()   const noexcept { return { this, nullptr, -1 };   }
+	
+	void
+	destroy() noexcept
+	{
+		if(m_first)
+		{
+			for(auto node = m_last; node;)
+			{
+				auto current = node;
+				node = node->prev;
+				destruct(*current);
+			}
+			m_table.destroy();
+			m_first = nullptr;
+			m_last  = nullptr;
+			m_size  = 0;
+		}
+	}
+
+	template <typename... Args, enable_if_t<is_constructible<E,Args...>::value,int> = 0>
+	iterator_t
+	emplace(Args &&... args)
+	{
+		if(!m_table)
+			return {};
+		return _insert_object({ forward<Args>(args)... });
+	}
+
+	template <typename... Args, enable_if_t<is_constructible<E,Args...>::value,int> = 0>
+	iterator_t
+	emplace_unique(Args &&... args)
+	{
+		if(!m_table)
+		return _insert_object_unique({ forward<Args>(args)... }, false);
+	}
+
+	template <typename... Args, enable_if_t<is_constructible<E,Args...>::value,int> = 0>
+	iterator_t
+	emplace_unique_replace(Args &&... args)
+	{
+		if(!m_table)
+			return {};
+		return _insert_object_unique({ forward<Args>(args)... }, true);
+	}
+
+	template <typename T = E
+		, enable_if_t<is_constructible<E,T>::value,int> = 0
+		, typename = decltype(decl<hash<E>>()(decl<T>()))
+	>
+	iterator_t
+	insert(T && object)
+	{
+		if(!m_table)
+			return {};
+		return _insert_object(forward<T>(object));
+	}
+
+	template <typename T = E
+		, enable_if_t<is_constructible<E,T>::value,int> = 0
+		, typename = decltype(decl<hash<E>>()(decl<T>()))
+	>
+	iterator_t
+	insert_unique(T && object)
+	{
+		if(!m_table)
+			return {};
+		return _insert_object_unique(forward<T>(object), false);
+	}
+
+	template <typename T = E
+		, enable_if_t<is_constructible<E,T>::value,int> = 0
+		, typename = decltype(decl<hash<E>>()(decl<T>()))
+	>
+	iterator_t
+	insert_unique_replace(T && object)
+	{
+		if(!m_table)
+			return {};
+		return _insert_object_unique(forward<T>(object), true);
+	}
+
+	bool
+	remove_at(iterator_t const & position) noexcept
+	{
+		if(position.m_list != this || position.m_node == nullptr)
+			return false;
+		// remove from the table
+		node_t * const node = position.m_node;
+		{
+			auto hash_ = hash<E>()(node->object);
+			auto * & entry = (*m_table)[hash_ % m_table->size()];
+			if(entry && entry->object == node->object)
+			{
+				if(hash<E>()(node->next->object) == hash_)
+					entry = node->next;
+				else
+					entry = nullptr;
+			}
+		}
+		// remove from the list
+		if(node->prev)
+			node->prev->next = node->next;
+		if(node->next)
+			node->next->prev = node->prev;
+		if(m_first == node)
+			m_first = node->next;
+		if(m_last == node)
+			m_last = node->prev;
+		destruct(*node);
+		_deallocate(node);
+		--m_size;
+		return true;
+	}
+
+	template <typename T = E, typename = decltype(decl<hash<E>>()(decl<T>()))>
+	inline bool
+	remove(T && object) noexcept
+	{
+		return remove_at(position_of(object));
+	}
+
+	template <typename T = E, typename = decltype(decl<hash<E>>()(decl<T>()))>
+	iterator_t 
+	position_of(T && object) noexcept
+	{
+		if(m_first)
+		{
+			size_t hash_index = 0;
+			auto & entry = _hash_entry_and_index(object, hash_index);
+			for(auto node = entry; node != nullptr; node = node->prev)
+			{
+				if(node->object == object)
+					return { this, node };
+				else if(_hash_index(node->object) != hash_index)
+					break;
+			}
+		}
+		return { this, nullptr, 1 };
+	}
+
+	template <typename T = E, typename = decltype(decl<hash<E>>()(decl<T>()))>
+	const_iterator_t 
+	position_of(T && object) const noexcept
+	{
+		if(m_first)
+		{
+			size_t hash_index = 0;
+			auto & entry = _hash_entry_and_index(object, hash_index);
+			for(auto node = entry; node != nullptr; node = node->prev)
+			{
+				if(node->object == object)
+					return { this, node };
+				else if(_hash_index(node->object) != hash_index)
+					break;
+			}
+		}
+		return { this, nullptr, 1 };
+	}
+
+	inline void 
+	swap(HashList & rhs) noexcept 
+	{
+		ds::swap(m_table, rhs.m_table);
+		ds::swap(m_first, rhs.m_first);
+		ds::swap(m_last, rhs.m_last);
+		ds::swap(m_size, rhs.m_size);
+	}
+
+};
+
+
+template <size_t table_size_, typename E, class A = DefaultAllocator> 
+using hash_list_iterator = HashListIterator<table_size_,E,A>;
+
+template <size_t table_size_, typename E, class A = DefaultAllocator> 
+using const_hash_list_iterator = HashListIterator<table_size_,E,A>;
+
+template <size_t table_size_, typename E, class A = DefaultAllocator> 
+using hash_list = HashList<table_size_,E,A>;
+
+
+template <size_t table_size_, typename E, class A, size_t size_>
+struct usage_s<HashList<table_size_,E,A>,size_> { static constexpr size_t value = (sizeof(HashListNode<table_size_,E>) + usage<E>::value) * size_; };
+
+template <size_t table_size_, typename E, class A, size_t size_, size_t count_>
+struct usage_sn<HashList<table_size_,E,A>,size_,count_>
+{
+	static constexpr size_t _single = usage_s<HashList<table_size_,E,A>,size_>::value;
+	static constexpr size_t value = (_single + (-_single & (alignof(HashListNode<table_size_,E>) - 1))) * count_;
+};
+
+
+} // namespace ds
+
+#endif // DS_HASH_LIST
